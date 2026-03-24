@@ -62,10 +62,22 @@ if load_meta:
     print(f"Loading meta from {meta_path}...")
     with open(meta_path, 'rb') as f:
         meta = pickle.load(f)
-    # TODO want to make this more general to arbitrary encoder/decoder schemes
     stoi, itos = meta['stoi'], meta['itos']
-    encode = lambda s: [stoi[c] for c in s]
-    decode = lambda l: ''.join([itos[i] for i in l])
+    tokenizer_type = meta.get('tokenizer_type', 'char')
+    if tokenizer_type == 'word':
+        import re
+        _punct_re = re.compile(r'([।॥\.,!?;:"\'\(\)\[\]\-–—/\\<>])')
+        unk_id = stoi.get(meta.get('unk_token', '<UNK>'), 1)
+        def _word_tokenize(s):
+            s = _punct_re.sub(r' \1 ', s)
+            return [t for t in s.split() if t.strip()]
+        encode = lambda s: [stoi.get(t, unk_id) for t in _word_tokenize(s)]
+        decode = lambda l: ' '.join([itos[i] for i in l])
+        print("Using word-level tokenizer")
+    else:
+        # char-level (original behaviour)
+        encode = lambda s: [stoi[c] for c in s]
+        decode = lambda l: ''.join([itos[i] for i in l])
 else:
     # ok let's assume gpt-2 encodings by default
     print("No meta.pkl found, assuming GPT-2 encodings...")
