@@ -47,60 +47,147 @@ If you peek inside it, you'll see that we're training a GPT with a context size 
 ```sh
 python sample.py --out_dir=out-premchand-char
 ```
+## What was changed to make it work with words 
+What changed and why it worked                                                                                                                       
 
-This generates a few samples, for example:
-पुकारे--पास जढ़ी, सोदों में की हाथ कक यह सकतली में सारे को उनके पहच ड़ाला जाना ने से की होगा, बडबूर भी नहीं मसंत हुए थी हो?
-पानात है मक कहीं इतनी कोई वह चार बोली का एक वह हम से ककर के दार से का बायद करने पास के िारा मेरेि तक ऊै।
-उस।
-जालपा सेिक बोले पासी को तुम उन्हें जी ब का िहती थी हुई िजर कर म कोई बूसर का िलखिा है है।
-वह वह सकार माल कर मदया का खेश के आड़े आ था, किल से समए बात गहन-भी मु ंशीबर बड़ी है, जैस ठी-प़ि ग्या ने भी आपका पड़ा है िक पास नही और म्यान ही ह, ककुछ खड़े और मि तक िकहां जाता देग
----------------
+  The core change: what a "token" means                                                                                                                
+   
+  The transformer architecture from "Attention is All You Need" is tokenization-agnostic — it doesn't care whether a token is a character, word, or    
+  subword. But what you feed as tokens completely changes what the model learns.
+                                                                                                                                                       
+  ---                                                                                                                                                  
+  1. Tokenizer (prepare.py)
+                                                                                                                                                       
+  Before (char-level):
+  "मुंशी प्रेमचंद" → ['म', 'ु', 'ं', 'श', 'ी', ' ', 'प', '्', 'र', 'े', 'म', ...]                                                                               
+  vocab_size ≈ 65
+                                                                                                                                                       
+  After (word-level):
+  "मुंशी प्रेमचंद" → ['मुंशी', 'प्रेमचंद']                                                                                                                       
+  vocab_size"=→7,853 '        ']
+                                                                                                                                                       
+  Hindi is a complex script — a single Devanagari akshara (syllable unit) can be 2-4 Unicode codepoints. At char-level, the model had to learn:
+  - That 'प' + '्' + 'र' = conjunct 'प्र'                                                                                                                
+  - That 'म' + 'ु' + 'ं' + 'श' + 'ी' = word 'मुंशी'                                                                                                        
+  - And then that this word means'something  ी'                                                                                                        
+                                                                                                                                                       
+  That's too many levels of abstraction for a small corpus. Word-level skips straight to meaning.                                                      
+                                                                                                                                                       
+  ---                                                                                                                                                  
+  2. The Embedding Layer — first section of the paper                                                                                                  
+                                                                                                                                                       
+  In the paper, Section 3.4 describes input embeddings:
+                                                                                                                                                       
+  ▎ "We convert the input tokens and output tokens to vectors of dimension d_model"                                                                    
+   
+  Token ID  →  Embedding Matrix  →  d_model vector                                                                                                     
+                                                                                                                                                       
+  At char-level:
+  - Token 'म' gets an embedding vector                                                                                                                 
+  - The vector for 'म' alone carries no semantic meaning — it's just one stroke of a letter                                                            
+  - The model must compose 5-10 char embeddings before anything meaningful can be attended to
+                                                                                                                                                       
+  At word-level:                                                                                                                                       
+                                                                                                                                                       
+  - Token 'मुंशी' gets its own embedding vector                                                                                                            esFrom the very first layer,  ach vector  epresents a complete semantic unit
+  - The embedding for 'खुशी' (happiness) canrbp close to 'प्रसन्नता' (joy) in embedding space — this is what the model learns during training
+                          '           )   n  e     e  o        ा     y  i         n     c      i  i    a   h     e      n      n        ng             
+  This is the most fundamental change. The paper's entire attention mechanism operates over these token embeddings — giving it richer input immediately
+   improves everything downstream.                                                                                                                     
+                                                                                                                                                       
+  ---                                                                                                                                                  
+  3. Positional Encoding + Attention — Section 3.5 and 3.2
+                                                                                                                                                       
+  The paper uses positional encodings so the model knows token order:
+                                                                                                                                                       
+  Position 0: "एक"    (one)
+  Position 1: "दिन"   (day)                                                                                                                                              
+  Position─2:─"की"────(of)─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  Position 3: "बात"   (thing/matter)                                                                                                                                     
+  →─"एक─दिन─की─बात"─=─"Once─upon─a─day"─(idiomatic─opener)─────────────────────────────────────────────────────────────────────────────────────────────
+                                                                                                                                                       
+  At char-level with block_size=256:
+  - 256 characters ≈ 30–40 words                                                                                                                       
+  - Attention heads are "wasted" learning character-to-character relations (which chars form a word)                                                   
+  - By the time the model attends across words, the context window is nearly full                   
+                                                                                                                                                       
+  At word-level with block_size=128:                                                                                                                   
+  - 128 words ≈ 3–5 full sentences                                                                                                                     
+  - Every attention head can immediately focus on word-to-word relationships                                                                           
+  - Subject-verb-object patterns in Hindi (SOV structure) fit cleanly within the window
+                                                                                                                                                       
+  The paper's multi-head attention (Section 3.2) learns different relationship types in parallel heads. At word-level, heads can specialize: one head  
+  learns verb-subject agreement, another learns pronoun references, another learns Premchand's narrative transitions like "लेकिन" (but) → "उसने" (he/she).                                                                                                                                                      
+   ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  ---                                                                                                                                                  
+  4. The Causal Mask — what the model predicts
+                                                                                                                                                       
+  The paper (and GPT) uses a causal (autoregressive) mask — each token can only attend to previous tokens:
+                                                                                                                                                       
+  "एक दिन जब" → predict → "रामू"
+  "एक दिन जब रामू" → predict → "घर"                                                                                                                     
+  "एक दिन जब रामू घर" → predict → "आया"                                                                                                                                                                                                                                                                        
+   ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  At char-level, the model was predicting:                                                                                                             
+  'ए' → 'क'       
+  'ए','क' → ' '                                                                                                                                        
+  'ए','क',' ' → 'द'    ← no semantic signal here at all                                                                                                
+                                                       
+  Each step carries almost zero meaning. The loss gradient is trying to teach "after 'ए' and 'क' comes ' '" — which is a mechanical spelling rule, not 
+  language understanding.                                                                                                                              
+                                                                                                                                                       
+  At word-level, every prediction step is semantically meaningful:                                                                                     
+  'एक' → 'दिन'           ← "one" → "day" (common Hindi phrase opener)
+  'एक','दिन' → 'जब'      ← "one day when" (narrative setup)                                                                                            
+           ' →    '      ←    e   y     "          e      )                                                                                            
+  The cross-entropy loss now penalizes the model for not understanding Hindi grammar and Premchand's narrative style, not just spelling.               
+                                                                                                                                                       
+  ---                                                                                                                                                  
+  5. Vocabulary size effect on the output layer                                                                                                        
+                                                                                                                                                       
+  The paper's final layer is a linear projection from d_model → vocab_size, followed by softmax:
+                                                                                                                                                       
+  d_model (384) → Linear → vocab_size logits → softmax → probability distribution
+                                                                                                                                                       
+  ┌────────────────┬──────────────────────────────────────┬──────────────────────────────────┐
+  │                │              Char-level              │            Word-level            │                                                         
+  ├────────────────┼──────────────────────────────────────┼──────────────────────────────────┤
+  │ vocab_size     │ ~65                                  │ 7,853                            │
+  ├────────────────┼──────────────────────────────────────┼──────────────────────────────────┤
+  │ Each output    │ 1 character                          │ 1 complete Hindi word            │                                                         
+  ├────────────────┼──────────────────────────────────────┼──────────────────────────────────┤                                                         
+  │ Errors visible │ Invisible (wrong chars look similar) │ Immediately obvious (wrong word) │                                                         
+  ├────────────────┼──────────────────────────────────────┼──────────────────────────────────┤                                                         
+  │ Loss signal    │ Weak per step                        │ Strong per step                  │
+  └────────────────┴──────────────────────────────────────┴──────────────────────────────────┘                                                         
+                  
+  At word-level, if the model outputs "वह" (he) where "वह" (she) was expected, the loss is sharp and clear. At char-level, one wrong character in the  
+  middle of a word gives a tiny gradient that might never propagate to learning word meaning.
+                                                                                                                                                       
+  ---             
+  Summary: the change in one diagram
+                                                                                                                                                       
+  CHAR-LEVEL (before)
+  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━                                                                                                       
+  Input:  ['म','ु','ं','श','ी',' ','प','्','र','े','म']                                                                                                    
+           ↓  Embedding (65-dim meaning: almost nothing)                                                                                               
+           ↓  Attention: learns "which chars follow which chars"                                                                                       
+           ↓  Output: predict next char → spelling, not meaning                                                                                        
+                                                                                                                                                       
+  WORD-LEVEL (after)                                                                                                                                   
+  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━                                                                                                       
+  Input:  ['मुंशी', 'प्रेमचंद', 'की', 'कहानी']                                                                                                              
+           ↓  Embedding (384-dim meaning: rich semantic vectors)                                                                                       
+           ↓  Attention: learns "which words relate to which words"                                                                                    
+                         heads learn Hindi grammar, narrative patterns                                                                                 
+           ↓  Output: predict next word → grammar + meaning + style                                                                                    
+                                                                                                                                                       
+  The transformer architecture stayed identical — same attention, same MLP, same residual connections, same layer norm. The only change was what we    
+  called a "token." But because the paper's architecture is powerful enough to model any sequential dependency, giving it word-level tokens meant it   
+  could immediately apply that power to learning Hindi language structure rather than spending all its capacity on spelling.                           
+                  
 
-बाहँ तक सलया खूँट ना पदु ं आता था ले िनकल बड़ गया।
-एक सारा यह क दूसर को का रूपये साथो, तुमसी लेखसे के ले बाते हूंगा हूं, सुधी।
-वहार पर चुवदि उसका उनका अमर्तु क्मलाम काल बाद धि नहीं लगती है।
-दगधीन कु ही मकिर का िन कके सामनें उनके एक िपास में िनखल जाना कर मलया काम आदिी कर िहे क्यों की भर वह हो उससके उनकी मन सबसा में परका और भी जाते है , लोड जाते, दान हुए से बश को सुनन के क्या, मुझ नहीं त अलान शूर थी, उसका एक िलनट के सीवत्य थी।
-उनके बोदां में से भी काल ककतने समझी, इस पहन र में कोछबोल से हो शास हुए क
----------------
 
-बैठ उनका स्व खाश्जन के प्रसदय को मनो।
-पाेपुी समझे प्रकु:कन पाप नार भी थी, रात हो ककहा, मैं इस उसके दसमुच्छ तो क्यों हो हो में आप से चली जानी, िह िजयाइतन क्मस करती थू बढ़े ?
-मांग है, जभी िनाद है, तो यह िब-जी सुख से साहब बाू तो मारा कर सुनी बुलार-प्रे का बहुत मकया था।
-म एक आई गए सुन के मल में जाते हैं बेच नकी के कही समता हँ?
-मिरा ग पार्चि हुए क िगर बचार को िनमरकार कर णामस्त नहीं, कक्छा घर में न एक वह कर उसका सूर-दन िारा कका पहला को बात है हमारा की िचन नार न मकर त्र उन्हें ने देवतयस कर बारे पापर री
----------------
-
-िलिमलान ज़ींग देख से और पह सब सारत बेचर्च ल है, रतनों उसकी ब तक मल से कहा, िससर समझता हूं के सपर इतना ले जाएगली ककी चाम समय कहीं मैं ककोई ही हुए दिखि हुआ िमक बने कोई बत बाड़ा था था।
-तुम तुम थी, रमा सार चोरों ने कोई आंधत नही हो के न रहीं ह कके तो दो बाडी आए, तो मारी साथ कक को कै मल में क्षणा में अपन पर का बोला लग जाए ?
-जालप हले पास भी तार मनोट का झोकर को अव व्यों से भी हैं, तो दू न कोई जाती हू पर िाश्वार मान पर चुकास तक कर हम िसर होगा।
-यह ककही है, मैं कक हब क्या तो मकल सहिाया के पर ने उसकाल माल उ
----------------
-
-रजात है पड़ा ह गया।
-सार कद्वार कर माली ती है, 
-चुभी कर ववसमारु:ख को के रदह मारे बह दूसर लाया जाने की समला पाप कर अपनी के नराश के के समिला िक तुवादि कर भी थी।
-िजसका पहलाम करक्यार का क-हाँ न रखि रहा गईं, प्रतुब आ हिें रही है।
-बेटा से दी थी, न एक  ऊूँ, बोली बैठने ककदर मानोटी थी, मानो का शशार के ‘मुि शान िकक्षा के खू था, तवह सोच था।
-यह तुम्हारे में नहीं हला करना कर उसकी मुझे द गश्जा हृदयार सढ़ ने लगी थी।
-इस क्यास-अभ्य उस िोता।
-रमा का और सब लल कर ने का पर के खोल से सप्रया कर काए कक पु सोधी से के कक अ
----------------
-
-दी जाकर हुई दूसमय हो गा।
-अब क्य बुलाये थ, ककिर कहती है।
-मैं उसने हम उसना उसके पाप है जान-म नही िक तरता है डरहे हाथ कक साहब तक जाया।
-खिनों िलखना के ककाल िबन के आने तुम कार उन्हें ने का िदिस्वास मदको सब हुआ होता है।
-तोई ने जाना परड़े कुल साहब ले िकर न कर साथ- आपका मचार आनने जो और सब लाया, अरू
-इतन में की अपने गू गाया पहली हो गयीं कर जात था, तुम्हें हैं, पास, प्रसिी ख में सौ न भर वह हुए जैसिय नीचाब नहीं िैं दे।
-मुझिोरी के पाते हो कहा हुए सालन चल जाते है, ह भैत बजाऊंगा, जी को ककुछ मुद्रत और का नहीं स
----------------
-
-पर का तुम् सूक रतो उपसे प्रत यह रहुए मेरे असमान की जो जाएेगे?
-अब ल जाते हुए ही लाया है।
-ज्ञादारई कर तो िमलाजी के ही का सके की सामद्धिन से हो, 'सबस कैचा से कमलेने ही गई, हमसेराई है।
-माला--क्या सुनध पर ने लग ने उसनके उनका जलू से के वल जा कर कक्या बार देते ही चल हो था।
-पास रम सभी अपनी संसला में से धध न के बडये होते थे।
-जब राफी नहीं से दो-िवपकार माना के आव मद जानों कर सूरक-जाकरने समकमला से जो से हुए भी नहीं हो सकदिर नहीं है।’ िकतश्मत नहीं भी तो हँ पहले, भाग हो, ‘जो कही आका कहीं है।
 वह सककतवा रहा--ककएक <UNK> <UNK> । ’ रमानाथ — <UNK> एक <UNK> , यह <UNK> । ’ रमानाथ — <UNK> ? ’ रमानाथ — <UNK> ! ’ रमेश - - - - - - - - तुमने कल से इतना जल्दि पीने जाती हूं । ‘ रमा ने मुस्कराकर कहा , तुम्हें चकमा देते , तो क्या क्या जवाब न लेने से कोई उपाय है , जो रूपये होते हैं । अभी क्या है ? ’ दियानाथ — <UNK> , यह कहते हो , मेरे िदिल के ही न कर सकता है , तो <UNK> । ’ रमानाथ — <UNK> नहीं , तो तुम दिाम ? ’ दियानाथ — <UNK> को लेकर क्या चीजें आया , तो <UNK> । ’ रमानाथ — <UNK> के िलए दिो रमेश - - - - - - - - - - - <UNK> ? ’ जालपा — <UNK> है , तुम तो क्या मतलब ! ’ रमा ने <UNK> , मगर दियानाथ — <UNK> । मेरे पास न लू रमेश - - - - - - - - - — यह हाल मालूम होता , तो मुझिे <UNK> के पीछे लौटा देना तो आप खुशी से वादे पर िरश्वत के िलए कोई न था तुम्हें कुछ लौटा दे नहीं आता । अभी तक तुम्हारा िचता न देते । जैसे दिो - हां , तो मैं अब औरतें िमलने लग जाय , वह <UNK> की क्या ? ’ रमानाथ — <UNK> तुम्हें व्यथर्च है , जब से कहा , तो , िफर तो और जो उपाय नहीं तो शायदि इसी तरह महीने में आप एक चीजें तो व्यथर्च में एक चीज़ ले लीिजएगा , तो दिो - सात सौ रूपये ही में इस <UNK> । ‘ जालपा — <UNK> <UNK> का सबसे अिधक <UNK> - <UNK> , उसी िदिन तो कोई िकसी से पांच रूपयों में <UNK> । यह तो मुझिे मुझिे क्या एक िदिन नहीं होता । िफर िकसी <UNK> नहीं से खुदि बडा होगा ? ’ ंह उधरकर पोंछते हुए ? ’ दियानाथ - - ओढ़ने के िलए इसमें तो शायदि तीन हज़ार का नाम तो नहीं , तो सवेरा हो , तो नहीं । हां , तो मैंने कुछ नहीं , तो नहीं , जो तुम ज़रा सब तमाशा नहीं दे दिो । इससे कोई गहनों के ओढ़ने के <UNK> के कंगन नहीं । ’ रमा ने पूरा होता । ‘ जालपा — <UNK> , तो तुम अपने दिाम से कह देना । ’ रमा ने <UNK> जाते , हमें <UNK> , तो गुिडयों के िक वह तो शायदि यहां के िलए यहां नहीं । लेिकन दिो - तो बताइए , लेिकन शायदि मुझिे अज़ी नहीं हूं ? ’ जालपा — पांच रूपये तो नगदि क्यों एक चीज़ तो <UNK> , तो <UNK> । लूटने से कुछ <UNK> में <UNK> की <UNK> , मगर दिो - <UNK> - चार गहने बंदि कर सकता हूं , कभी <UNK> , बूढ़े - चार िदिन से वह तो चार िदिन हर दिो - तीन - एक चीज़ से यह जडाऊ िदिन <UNK> <UNK> । कहां से कुछ रूपये िमल
 ---------------
 एक <UNK> में सभी उसके संप णद जीवन - चार <UNK> बन जाती है , यह एक चुटकी भर कर <UNK> करते <UNK> - सब <UNK> थीं । रायसाहब का कोई <UNK> - सा रस - भर - कभी <UNK> से भी दस - तले अपने भजन ह चुका था । न करिे हैं , इसनलए नहीं । रायसाहब ने कु छ न था । गोबर चमार । जब अपना <UNK> में कहा - एक गाय है । रुपए तो ककसी रुपए <UNK> में हम नसर पर जा कर द ध कोई <UNK> नहीं , तो किर , वह गऊ से बड़ी मुनककल से भेंट करना , तो यही वह छोटी - <UNK> से - कभी न करें , तो मैंने भी नहीं , वह चाहे <UNK> । धननया ने दो । होरी पर <UNK> के नलए द ध ध नमल गई । गोबर के नलए <UNK> के नलए रुपए होगी । ककसी तरह - न जाने से लौटे । किर द सरा नाूँद भी न <UNK> देख कर बोले - पीछे तो देखा , मैं तो उसके हाथ - अगर वह पछाईं गाय नमल जाय । अच्छा , तो क्या ? ककसी के - राम - अब तक न कर उठा कर कहा - भर की कमी है ? राम के के नलए तरस कर दो , तो रोज - - - वस का काम के पास <UNK> । नाटे खी जाते हैं । गाय तो बछवे ही । यही क्या कमी है , तो <UNK> - कै से <UNK> कर कोई द सरा आदमी , तो वह भ सा <UNK> - <UNK> पर भी तो मारे मज री है । ' मुझसे क्यों ? रुपए माूँगता ? रुपए तो रुपए में कु छ मदद तो इतनी िु ू ' नहीं तो रुपए खी हैं , ऐसा <UNK> । ' प णाफ ने नेवता देने लगी । ' नहीं है , तो मैंने मेरे घर के घर में कु छ न मानोगी तो वहाूँ का काम करता है । ' मुझसे ले कदया , तो अपने मन - पाूँच सेर द ध पड़िी थी । ' यह तो रुपए क्या ' ' <UNK> । ' ' बहुि देख कर कहा - <UNK> में ककसी की गई ? ' नहीं , वह भी कोई कु छ स झी , लेककन क्यों हो , मेरा मन - ' क्या यही <UNK> आज कु छ नहीं होता , <UNK> है ? ' कमलाप्रसाद - ' ' इस <UNK> जाना । ' न कोई <UNK> में कोई बात है । ' बदरीप्रसाद ने इस काम ही िो शायद उसके मु ाँह पानी की उसे अप्रसन्न करके बोली - ' बस , मेरी क्या िुमसे कोई बाि कही - ' क्या समझ लो , मैं िुम्हें जािी है । ' क्या मैं <UNK> । ' क्या कभी बड़ी <UNK> हो । ' बदरीप्रसाद ने गदगद कं ठ नहीं समझा । ' बदरीप्रसाद - ' नहीं आिा है , और दो - ' िुम क्यों रखिी हो प णाफ , मैं मेरे घर में कहा - '
@@ -267,6 +354,3 @@ For more questions/discussions feel free to stop by **#nanoGPT** on Discord:
 
 [![](https://dcbadge.vercel.app/api/server/3zy8kqD9Cp?compact=true&style=flat)](https://discord.gg/3zy8kqD9Cp)
 
-## acknowledgements
-
-All nanoGPT experiments are powered by GPUs on [Lambda labs](https://lambdalabs.com), my favorite Cloud GPU provider. Thank you Lambda labs for sponsoring nanoGPT!
